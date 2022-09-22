@@ -81,6 +81,7 @@ char *_progname;
 static char **saved_argv;
 struct ev_loop *loop;
 static ev_timer reorder_drain_timeout;
+static uint8_t reorder_drain_timeout_running = 0;
 static ev_timer reorder_adjust_rtt_timeout;
 struct rtunhead rtuns;
 char *status_command = NULL;
@@ -88,6 +89,7 @@ char *process_title = NULL;
 int logdebug = 0;
 
 static uint64_t data_seq = 0;
+static uint32_t max_buffered_packets = 32768;
 
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
@@ -226,10 +228,14 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 static void
 mlvpn_rtun_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
-    log_debug("reorder", "reorder timeout. Packet loss?");
+    log_warnx("reorder", "reorder timeout. Packet loss?");
     mlvpn_rtun_reorder_drain(0);
     if (freebuf->used == 0) {
+        log_debug("reorder", "stopping reorder timeout timer in timeout handler");
         ev_timer_stop(EV_A_ w);
+        reorder_drain_timeout_running = 0;
+    } else {
+        log_warnx("reorder", "NOT stopping reorder timeout timer in timeout handler");
     }
 }
 
@@ -238,28 +244,44 @@ mlvpn_rtun_reorder_drain(uint32_t reorder)
 {
     int i;
     uint32_t drained = 0;
-    mlvpn_pkt_t *drained_pkts[1024];
+    uint32_t force_drained = 0;
+    mlvpn_pkt_t *drained_pkts[max_buffered_packets];
     mlvpn_pkt_t *pkt;
     /* Try to drain packets */
-    if (reorder) {
-        drained = mlvpn_reorder_drain(reorder_buffer, drained_pkts, 1024);
-        for(i = 0; i < drained; i++) {
+    log_debug("reorder", "draining up to %d packets", max_buffered_packets);
+    drained = mlvpn_reorder_drain(reorder_buffer, drained_pkts, max_buffered_packets);
+    for(i = 0; i < drained; i++) {
+        pkt = drained_pkts[i];
+		log_debug("reorder", "drained packet with seq no %"PRIu64, pkt->seq);
+        mlvpn_rtun_inject_tuntap(pkt);
+        mlvpn_freebuffer_free(freebuf, drained_pkts[i]);
+    }
+    if (!reorder) {
+        /* Try to drain ordered packets */
+        log_info("reorder", "force draining up to %d packets", max_buffered_packets);
+        force_drained = mlvpn_reorder_force_drain(reorder_buffer, drained_pkts, max_buffered_packets);
+        for(i = 0; i < force_drained; i++) {
             pkt = drained_pkts[i];
+            log_debug("reorder", "force drained packet with seq no %"PRIu64, pkt->seq);
             mlvpn_rtun_inject_tuntap(pkt);
             mlvpn_freebuffer_free(freebuf, drained_pkts[i]);
         }
-    } else {
+        log_info("reorder", "flushing every remaining packet");
         while ((pkt = mlvpn_freebuffer_drain_used(freebuf)) != NULL) {
-            drained++;
+            log_debug("reorder", "flushing packet with seq no %"PRIu64, pkt->seq);
+            force_drained++;
             mlvpn_rtun_inject_tuntap(pkt);
         }
-        mlvpn_freebuffer_reset(freebuf);
-        mlvpn_reorder_reset(reorder_buffer);
+        log_info("reorder", "force drained %d packets", force_drained);
+        //mlvpn_freebuffer_reset(freebuf);
+        //mlvpn_reorder_reset(reorder_buffer);
     }
     if (freebuf->used == 0) {
+        log_debug("reorder", "stopping reorder timeout timer in drain");
         ev_timer_stop(EV_A_ &reorder_drain_timeout);
+        reorder_drain_timeout_running = 0;
     }
-    return drained;
+    return drained + force_drained;
 }
 
 /* Count the loss on the last 64 packets */
@@ -303,6 +325,7 @@ mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
         mlvpn_rtun_inject_tuntap(inpkt);
         return 1;
     } else {
+        log_debug("reorder", "got new incoming packet");
         mlvpn_pkt_t *pkt = mlvpn_freebuffer_get(freebuf);
         if (!pkt) {
             log_warnx("reorder", "freebuffer full: reorder_buffer_size must be increased.");
@@ -311,24 +334,35 @@ mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
         }
         memcpy(pkt, inpkt, sizeof(mlvpn_pkt_t));
         ret = mlvpn_reorder_insert(reorder_buffer, pkt);
+        if (ret != 0)
+            log_warnx("reorder", "reorder_buffer_insert failed: %d", ret);
         if (ret == -1) {
-            log_warnx("net", "reorder_buffer_insert failed: %d", ret);
-            mlvpn_reorder_reset(reorder_buffer);
+            log_warnx("reorder", "flushing everything we have and sending inpkt directly afterwards");
             drained = mlvpn_rtun_reorder_drain(0);
-        } else if (ret == -2) {
-            /* We have received a packet out of order just
-             * after the forced drain (packet loss)
-             * Just inject the packet as is
-             */
+            log_debug("reorder", "now sending inpkt directly...");
             mlvpn_rtun_inject_tuntap(inpkt);
+            drained += 1;       // also count our directly injected packet
+//         } else if (ret == -2) {
+//             log_warnx("reorder", "packet vastly out of order, injecting dirctly without using reorder buffer");
+//             mlvpn_rtun_inject_tuntap(inpkt);
+//             return 1;
+        } else if (ret == -2) {
+            log_warnx("reorder", "packet vastly out of order, discarding");
             return 1;
         } else {
             drained = mlvpn_rtun_reorder_drain(1);
         }
-        if (freebuf->used > 0) {
+        log_debug("reorder", "drained %d packets", drained);
+        // check if we need a timer (we drained nothing, but have packets waiting) AND if it is not already running
+        if (drained > 0) {
+            log_debug("reorder", "drained > 0  packets, stopping reorder timeout");
+            ev_timer_stop(EV_A_ &reorder_drain_timeout);
+            reorder_drain_timeout_running = 0;
+        } else if(freebuf->used > 0 && !reorder_drain_timeout_running) {
+            log_debug("reorder", "possible packet loss: restarting reorder timeout");
             ev_timer_again(EV_A_ &reorder_drain_timeout);
+            reorder_drain_timeout_running = 1;
         }
-        //log_debug("reorder", "drained %d packets", drained);
     }
     return drained;
 }
@@ -370,11 +404,11 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
 
         if ((tun->addrinfo->ai_addrlen != addrlen) ||
                 (memcmp(tun->addrinfo->ai_addr, &clientaddr, addrlen) != 0)) {
-            if (! tun->status >= MLVPN_AUTHOK) {
-                log_warnx("protocol", "%s rejected non authenticated connection",
-                    tun->name);
+            /*if (! (tun->status >= MLVPN_AUTHOK)) {
+                log_warnx("protocol", "%s rejected non authenticated connection: %d",
+                    tun->name, tun->status);
                 return;
-            }
+            }*/
             char clienthost[NI_MAXHOST];
             char clientport[NI_MAXSERV];
             int ret;
@@ -663,7 +697,7 @@ mlvpn_rtun_new(const char *name,
     new->sentpackets = 0;
     new->sentbytes = 0;
     new->recvbytes = 0;
-    new->seq = 0;
+    new->seq = crypto_nonce_random();           // use random initial seq number to have more entropy in our nonce
     new->expected_receiver_seq = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
@@ -983,7 +1017,8 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
         cmdargs[2] = NULL;
         priv_run_script(2, cmdargs, env_len, env);
         mlvpn_status.initialized = 1;
-        if (reorder_buffer != NULL) {
+        if (reorder_buffer != NULL && (!t->fallback_only || mlvpn_status.fallback_mode)) {
+            log_warnx("reorder", "force flushing reorder buffer and resetting afterwards");
             mlvpn_rtun_reorder_drain(0);
             mlvpn_reorder_reset(reorder_buffer);
         }
@@ -1023,6 +1058,7 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
         }
         mlvpn_free_script_env(env);
         if (reorder_buffer != NULL) {
+            log_warnx("reorder", "force flushing reorder buffer and resetting afterwards");
             mlvpn_rtun_reorder_drain(0);
             mlvpn_reorder_reset(reorder_buffer);
         }
@@ -1278,10 +1314,11 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     if (max_srtt > 0) {
         /* Apply a factor to the srtt in order to get a window */
         max_srtt *= 2.2;
-        log_debug("reorder", "adjusting reordering drain timeout to %.0fms",
+        log_info("reorder", "adjusting reordering drain timeout to %.0fms",
             max_srtt);
         reorder_drain_timeout.repeat = max_srtt / 1000.0;
     } else {
+        log_info("reorder", "adjusting reordering drain timeout to 800ms");
         reorder_drain_timeout.repeat = 0.8; /* Conservative 800ms shot */
     }
 }
@@ -1307,7 +1344,7 @@ mlvpn_tuntap_init()
     memset(&tuntap, 0, sizeof(tuntap));
     snprintf(tuntap.devname, MLVPN_IFNAMSIZ-1, "%s", "mlvpn0");
     tuntap.maxmtu = 1500 - PKTHDRSIZ(proto) - IP4_UDP_OVERHEAD;
-    log_debug(NULL, "absolute maximum mtu: %d", tuntap.maxmtu);
+    log_info(NULL, "absolute maximum mtu: %d", tuntap.maxmtu);
     tuntap.type = MLVPN_TUNTAPMODE_TUN;
     tuntap.sbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
     ev_init(&tuntap.io_read, tuntap_io_event);
@@ -1529,7 +1566,7 @@ main(int argc, char **argv)
     if (mlvpn_options.change_process_title)
         update_process_title();
 
-    freebuf = mlvpn_freebuffer_init(512);
+    freebuf = mlvpn_freebuffer_init(max_buffered_packets);
 
     /* Kill me if my root process dies ! */
 #ifdef HAVE_LINUX
@@ -1562,7 +1599,7 @@ main(int argc, char **argv)
     ev_io_start(loop, &tuntap.io_read);
 
     ev_timer_init(&reorder_adjust_rtt_timeout,
-        mlvpn_rtun_adjust_reorder_timeout, 0., 1.0);
+        mlvpn_rtun_adjust_reorder_timeout, 0., 4.0);
     ev_timer_start(EV_A_ &reorder_adjust_rtt_timeout);
 
     priv_set_running_state();

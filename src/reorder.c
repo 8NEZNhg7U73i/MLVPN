@@ -45,6 +45,7 @@ struct cir_buffer {
     unsigned int mask;   /**< [buffer_size - 1]: used for wrap-around */
     unsigned int head;   /**< insertion point in buffer */
     unsigned int tail;   /**< extraction point in buffer */
+    unsigned int count;
     mlvpn_pkt_t **pkts;
 };
 
@@ -52,7 +53,6 @@ struct cir_buffer {
 struct mlvpn_reorder_buffer {
     uint64_t min_seqn;  /**< Lowest seq. number that can be in the buffer */
     unsigned int memsize; /**< memory area size of reorder buffer */
-    struct cir_buffer ready_buf; /**< temp buffer for dequeued pkts */
     struct cir_buffer order_buf; /**< buffer used to reorder pkts */
     int is_initialized;
 };
@@ -62,7 +62,7 @@ mlvpn_reorder_init(struct mlvpn_reorder_buffer *b, unsigned int bufsize,
         unsigned int size)
 {
     const unsigned int min_bufsize = sizeof(*b) +
-                    (2 * size * sizeof(mlvpn_pkt_t *));
+                    (size * sizeof(mlvpn_pkt_t *));
     if (b == NULL) {
         log_crit("reorder", "Invalid reorder buffer parameter: NULL");
         return NULL;
@@ -75,10 +75,9 @@ mlvpn_reorder_init(struct mlvpn_reorder_buffer *b, unsigned int bufsize,
 
     memset(b, 0, bufsize);
     b->memsize = bufsize;
-    b->order_buf.size = b->ready_buf.size = size;
-    b->order_buf.mask = b->ready_buf.mask = size - 1;
-    b->ready_buf.pkts = (void *)&b[1];
-    b->order_buf.pkts = (void *)&b[1] + (size * sizeof(b->ready_buf.pkts[0]));
+    b->order_buf.size = size;
+    b->order_buf.mask = size - 1;
+    b->order_buf.pkts = (void *)&b[1];
 
     return b;
 }
@@ -103,6 +102,7 @@ mlvpn_reorder_create(unsigned int size)
 void
 mlvpn_reorder_reset(struct mlvpn_reorder_buffer *b)
 {
+    log_info("reorder", "resetting reorder buffer");
     mlvpn_reorder_init(b, b->memsize, b->order_buf.size);
 }
 
@@ -115,69 +115,44 @@ mlvpn_reorder_free(struct mlvpn_reorder_buffer *b)
     free(b);
 }
 
-
-static unsigned
-mlvpn_reorder_fill_overflow(struct mlvpn_reorder_buffer *b, unsigned n)
+inline uint8_t
+is_empty(struct cir_buffer *buf)
 {
-    /*
-     * 1. Move all ready pkts that fit to the ready_buf
-     * 2. check if we meet the minimum needed (n).
-     * 3. If not, then skip any gaps and keep moving.
-     * 4. If at any point the ready buffer is full, stop
-     * 5. Return the number of positions the order_buf head has moved
-     */
+    return buf->tail == buf->head;
+}
 
-    struct cir_buffer *order_buf = &b->order_buf,
-            *ready_buf = &b->ready_buf;
+inline uint8_t
+is_full(struct cir_buffer *buf)
+{
+    return ((buf->tail + 1) & buf->mask) == buf->head;
+}
 
-    unsigned int order_head_adv = 0;
-
-    /*
-     * move at least n packets to ready buffer, assuming ready buffer
-     * has room for those packets.
-     */
-    while (order_head_adv < n &&
-            ((ready_buf->head + 1) & ready_buf->mask) != ready_buf->tail) {
-
-        /* if we are blocked waiting on a packet, skip it */
-        if (order_buf->pkts[order_buf->head] == NULL) {
-            order_buf->head = (order_buf->head + 1) & order_buf->mask;
-            order_head_adv++;
-        }
-
-        /* Move all ready pkts that fit to the ready_buf */
-        while (order_buf->pkts[order_buf->head] != NULL) {
-            ready_buf->pkts[ready_buf->head] =
-                    order_buf->pkts[order_buf->head];
-
-            order_buf->pkts[order_buf->head] = NULL;
-            order_head_adv++;
-
-            order_buf->head = (order_buf->head + 1) & order_buf->mask;
-
-            if (((ready_buf->head + 1) & ready_buf->mask) == ready_buf->tail)
-                break;
-
-            ready_buf->head = (ready_buf->head + 1) & ready_buf->mask;
-        }
+inline mlvpn_pkt_t*
+dequeue_from_order_buf(struct mlvpn_reorder_buffer *b)
+{
+    struct cir_buffer *order_buf = &b->order_buf;
+    mlvpn_pkt_t *packet = order_buf->pkts[order_buf->head];
+    order_buf->pkts[order_buf->head] = NULL;
+    b->min_seqn = packet->seq + 1;          // we expect the next packet to be the first one in our order_buf
+    order_buf->head = (order_buf->head + 1) & order_buf->mask;
+    if (order_buf->count > 0) {
+        order_buf->count--;
     }
-
-    b->min_seqn += order_head_adv;
-    /* Return the number of positions the order_buf head has moved */
-    return order_head_adv;
+    log_debug("reorder", "dequeued packet from order_buf: %lu", packet->seq);
+    return packet;
 }
 
 int
 mlvpn_reorder_insert(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t *pkt)
 {
-    uint64_t offset;
+    int64_t offset;
     uint32_t position;
     struct cir_buffer *order_buf = &b->order_buf;
 
     if (!b->is_initialized) {
         b->min_seqn = pkt->seq;
         b->is_initialized = 1;
-        log_debug("reorder", "initial sequence: %"PRIu64"", pkt->seq);
+        log_info("reorder", "initial sequence: %"PRIu64"", pkt->seq);
     }
 
     /*
@@ -190,40 +165,17 @@ mlvpn_reorder_insert(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t *pkt)
      */
     offset = pkt->seq - b->min_seqn;
 
-    /*
-     * action to take depends on offset.
-     * offset < buffer->size: the pkt fits within the current window of
-     *    sequence numbers we can reorder. EXPECTED CASE.
-     * offset > buffer->size: the pkt is outside the current window. There
-     *    are a number of cases to consider:
-     *    1. The packet sequence is just outside the window, then we need
-     *       to see about shifting the head pointer and taking any ready
-     *       to return packets out of the ring. If there was a delayed
-     *       or dropped packet preventing drains from shifting the window
-     *       this case will skip over the dropped packet instead, and any
-     *       packets dequeued here will be returned on the next drain call.
-     *    2. The packet sequence number is vastly outside our window, taken
-     *       here as having offset greater than twice the buffer size. In
-     *       this case, the packet is probably an old or late packet that
-     *       was previously skipped, so just enqueue the packet for
-     *       immediate return on the next drain call, or else return error.
-     */
-    if (offset < b->order_buf.size) {
+    if (offset >= 0 && offset < b->order_buf.size) {
         position = (order_buf->head + offset) & order_buf->mask;
+        log_debug("reorder", "inserting packet %lu at position %u with offset %ld and min_seqn %lu", pkt->seq, position, offset, b->min_seqn);
         order_buf->pkts[position] = pkt;
-    } else if (offset < 2 * b->order_buf.size) {
-        if (mlvpn_reorder_fill_overflow(b, offset + 1 - order_buf->size)
-                < (offset + 1 - order_buf->size)) {
-            /* Put in handling for enqueue straight to output */
-            return -1;
-        }
-        offset = pkt->seq - b->min_seqn;
-        position = (order_buf->head + offset) & order_buf->mask;
-        order_buf->pkts[position] = pkt;
-    } else {
-        /* Put in handling for enqueue straight to output */
-        log_debug("reorder", "packet sequence out of range");
+        order_buf->count++;
+    } else if (offset < 0) {
+        log_info("reorder", "packet %lu out of range, offset %ld and min_seqn %lu", pkt->seq, offset, b->min_seqn);
         return -2;
+    } else {
+        log_info("reorder", "packet %lu out of range, offset %ld and min_seqn %lu", pkt->seq, offset, b->min_seqn);
+        return -1;
     }
     return 0;
 }
@@ -234,25 +186,45 @@ mlvpn_reorder_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
 {
     unsigned int drain_cnt = 0;
 
-    struct cir_buffer *order_buf = &b->order_buf,
-            *ready_buf = &b->ready_buf;
-
-    /* Try to fetch requested number of pkts from ready buffer */
-    while ((drain_cnt < max_pkts) && (ready_buf->tail != ready_buf->head)) {
-        pkts[drain_cnt++] = ready_buf->pkts[ready_buf->tail];
-        ready_buf->tail = (ready_buf->tail + 1) & ready_buf->mask;
-    }
+    struct cir_buffer *order_buf = &b->order_buf;
 
     /*
-     * If requested number of buffers not fetched from ready buffer, fetch
-     * remaining buffers from order buffer
+     * fetch packets from order_buf until encountering our first hole
+     * (don't "fetch" the hole als well, leaving it to be filled later)
      */
     while ((drain_cnt < max_pkts) &&
             (order_buf->pkts[order_buf->head] != NULL)) {
-        pkts[drain_cnt++] = order_buf->pkts[order_buf->head];
-        order_buf->pkts[order_buf->head] = NULL;
-        b->min_seqn++;
-        order_buf->head = (order_buf->head + 1) & order_buf->mask;
+        pkts[drain_cnt++] = dequeue_from_order_buf(b);
+        log_debug("reorder", "added packet from order_buf to drain output: %lu", pkts[drain_cnt-1]->seq);
+    }
+    return drain_cnt;
+}
+
+unsigned int
+mlvpn_reorder_force_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
+        unsigned max_pkts)
+{
+    uint64_t drain_cnt = 0;
+    uint64_t skipped_holes = 0;
+
+    struct cir_buffer *order_buf = &b->order_buf;
+
+    /*
+     * fetch packets from order_buf skipping the first hole
+     */
+    for(uint64_t i=0; i < order_buf->size && drain_cnt < max_pkts; i++) {
+        if (order_buf->pkts[order_buf->head] != NULL) {
+            pkts[drain_cnt] = dequeue_from_order_buf(b);
+            log_debug("reorder", "%lu: force added packet %lu from order_buf to drain output: %lu", i, drain_cnt, pkts[drain_cnt]->seq);
+            drain_cnt++;
+        } else {
+        //} else if (skipped_holes < 1) {
+            skipped_holes++;
+            order_buf->head = (order_buf->head + 1) & order_buf->mask;
+            log_debug("reorder", "%lu: skipping missing packet at drain count %lu, skipped holes: %lu", i, drain_cnt, skipped_holes);
+        //} else {
+        //    log_debug("reorder", "%lu: already skipped %lu missing packets, stopping force drain at drain count %lu", i, skipped_holes, drain_cnt);
+        }
     }
     return drain_cnt;
 }
