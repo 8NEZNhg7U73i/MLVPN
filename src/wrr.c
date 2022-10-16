@@ -58,7 +58,7 @@ int mlvpn_rtun_wrr_reset(struct rtunhead *head, int use_fallbacks)
 }
 
 mlvpn_tunnel_t *
-mlvpn_rtun_wrr_choose()
+mlvpn_rtun_wrr_choose(uint32_t pktlen, uint32_t mtu)
 {
     int i;
     int idx;
@@ -73,7 +73,7 @@ mlvpn_rtun_wrr_choose()
     for(i = 0; i < wrr.len; i++)
     {
         if (wrr.tunval[i] > 0)
-            wrr.tunval[i] -= 1;
+            wrr.tunval[i] -= (double)pktlen / (double)mtu;
     }
     wrr.tunval[idx] = (double) 100.0 / wrr.tunnel[idx]->weight;
     return wrr.tunnel[idx];

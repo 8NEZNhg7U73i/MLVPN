@@ -195,8 +195,8 @@ int mlvpn_sock_set_nonblocking(int fd);
 
 int mlvpn_loss_ratio(mlvpn_tunnel_t *tun);
 int mlvpn_rtun_wrr_reset(struct rtunhead *head, int use_fallbacks);
-mlvpn_tunnel_t *mlvpn_rtun_wrr_choose();
-mlvpn_tunnel_t *mlvpn_rtun_choose();
+mlvpn_tunnel_t *mlvpn_rtun_wrr_choose(uint32_t pktlen, uint32_t mtu);
+mlvpn_tunnel_t *mlvpn_rtun_choose(uint32_t pktlen);
 mlvpn_tunnel_t *mlvpn_rtun_new(const char *name,
     const char *bindaddr, const char *bindport, uint32_t bindfib,
     const char *destaddr, const char *destport,

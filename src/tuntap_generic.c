@@ -8,14 +8,14 @@ mlvpn_tuntap_generic_read(u_char *data, uint32_t len)
     mlvpn_pkt_t *pkt;
 
 #ifdef HAVE_FILTERS
-    rtun = mlvpn_filters_choose((uint32_t)len, data);
+    rtun = mlvpn_filters_choose(len, data);
     if (rtun) {
         /* High priority buffer, not reorderd when a filter applies */
         sbuf = rtun->hpsbuf;
     }
 #endif
     if (!rtun) {
-        rtun = mlvpn_rtun_choose();
+        rtun = mlvpn_rtun_choose(len);
         /* Not connected to anyone. read and discard packet. */
         if (! rtun) 
             return len;

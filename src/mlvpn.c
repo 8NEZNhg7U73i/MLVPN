@@ -157,7 +157,7 @@ static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf);
 static void mlvpn_rtun_send_auth(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_status_up(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t);
-static void mlvpn_rtun_recalc_weight();
+static void mlvpn_rtun_recalc_weight(int use_fallbacks);
 static void mlvpn_update_status();
 static int mlvpn_rtun_bind(mlvpn_tunnel_t *t);
 static void update_process_title();
@@ -780,7 +780,7 @@ mlvpn_rtun_drop(mlvpn_tunnel_t *t)
  * to balance correctly the round robin rtun_choose.
  */
 static void
-mlvpn_rtun_recalc_weight()
+mlvpn_rtun_recalc_weight(int use_fallbacks)
 {
     mlvpn_tunnel_t *t;
     uint32_t bandwidth_total = 0;
@@ -791,7 +791,7 @@ mlvpn_rtun_recalc_weight()
     {
         if (t->bandwidth == 0)
             warned++;
-        bandwidth_total += t->bandwidth;
+        bandwidth_total += (!!t->fallback_only) == (!!use_fallbacks) ? t->bandwidth : 0;
     }
     if (warned && bandwidth_total > 0) {
         log_warnx("config", "you must set the bandwidth on every tunnel");
@@ -805,7 +805,7 @@ mlvpn_rtun_recalc_weight()
             {
                 t->weight = (((double)t->bandwidth /
                               (double)bandwidth_total) * 100.0);
-                log_debug("wrr", "%s weight = %f (%u %u)", t->name, t->weight,
+                log_info("wrr", "%s weight = %f (%u %u)", t->name, t->weight,
                     t->bandwidth, bandwidth_total);
             }
         }
@@ -1018,6 +1018,7 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
     t->last_keepalive_ack = now;
     t->last_keepalive_ack_sent = now;
     mlvpn_update_status();
+    mlvpn_rtun_recalc_weight(mlvpn_status.fallback_mode);
     mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
     mlvpn_script_get_env(&env_len, &env);
     priv_run_script(3, cmdargs, env_len, env);
@@ -1058,6 +1059,7 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
         mlvpn_script_get_env(&env_len, &env);
         priv_run_script(3, cmdargs, env_len, env);
         /* Re-initialize weight round robin */
+        mlvpn_rtun_recalc_weight(mlvpn_status.fallback_mode);
         mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
         if (mlvpn_status.connected == 0 && mlvpn_status.initialized == 1) {
             cmdargs[0] = tuntap.devname;
@@ -1177,10 +1179,10 @@ mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
 }
 
 mlvpn_tunnel_t *
-mlvpn_rtun_choose()
+mlvpn_rtun_choose(uint32_t pktlen)
 {
     mlvpn_tunnel_t *tun;
-    tun = mlvpn_rtun_wrr_choose();
+    tun = mlvpn_rtun_wrr_choose(pktlen, mlvpn_options.mtu);
     return tun;
 }
 
@@ -1218,6 +1220,7 @@ switch_to_fallback_if_necessary() {
     LIST_FOREACH(t, &rtuns, entries) {
         if (! t->fallback_only && t->status != MLVPN_HIGH_LATENCY && t->status != MLVPN_LOSSY) {
             mlvpn_status.fallback_mode = 0;
+			mlvpn_rtun_recalc_weight(mlvpn_status.fallback_mode);
             mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
             return;
         }
@@ -1225,6 +1228,7 @@ switch_to_fallback_if_necessary() {
     if (mlvpn_options.fallback_available) {
         log_info(NULL, "all tunnels are down, lossy or too slow, switch fallback mode");
         mlvpn_status.fallback_mode = 1;
+		mlvpn_rtun_recalc_weight(mlvpn_status.fallback_mode);
         mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
     } else {
         log_info(NULL, "all tunnels are down, lossy or too slow but fallback is not available");
@@ -1413,7 +1417,7 @@ mlvpn_config_reload(EV_P_ ev_signal *w, int revents)
         } else {
             if (time(&mlvpn_status.last_reload) == -1)
                 log_warn("config", "last_reload time set failed");
-            mlvpn_rtun_recalc_weight();
+            mlvpn_rtun_recalc_weight(0);
         }
     } else {
         log_warn("config", "open failed");
@@ -1626,7 +1630,7 @@ main(int argc, char **argv)
 #endif
 
     /* re-compute rtun weight based on bandwidth allocation */
-    mlvpn_rtun_recalc_weight();
+    mlvpn_rtun_recalc_weight(0);
 
     /* Last check before running */
     if (getppid() == 1)
