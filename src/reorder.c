@@ -204,10 +204,15 @@ unsigned int
 mlvpn_reorder_force_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
         unsigned max_pkts)
 {
+	uint64_t min_seqn = b->min_seqn;
+	uint64_t first_drained = 0;
+	uint64_t last_packet = 0;
     uint64_t drain_cnt = 0;
     uint64_t skipped_holes = 0;
-
     struct cir_buffer *order_buf = &b->order_buf;
+	
+	char drain_log[max_pkts];
+	memset(drain_log, 0, max_pkts);
 
     /*
      * fetch packets from order_buf skipping the first hole
@@ -215,16 +220,23 @@ mlvpn_reorder_force_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
     for(uint64_t i=0; i < order_buf->size && drain_cnt < max_pkts; i++) {
         if (order_buf->pkts[order_buf->head] != NULL) {
             pkts[drain_cnt] = dequeue_from_order_buf(b);
+			if(!first_drained)
+				first_drained = pkts[drain_cnt]->seq;
             log_debug("reorder", "%lu: force added packet %lu from order_buf to drain output: %lu", i, drain_cnt, pkts[drain_cnt]->seq);
             drain_cnt++;
+			drain_log[i]='.';
+			last_packet = i;
         } else {
         //} else if (skipped_holes < 1) {
             skipped_holes++;
             order_buf->head = (order_buf->head + 1) & order_buf->mask;
             log_debug("reorder", "%lu: skipping missing packet at drain count %lu, skipped holes: %lu", i, drain_cnt, skipped_holes);
+			drain_log[i]='E';
         //} else {
         //    log_debug("reorder", "%lu: already skipped %lu missing packets, stopping force drain at drain count %lu", i, skipped_holes, drain_cnt);
         }
     }
+    drain_log[last_packet+1]='\0';
+    log_info("reorder", "Buffer start %lu, first drained: %lu: Drained %lu packets encountering %lu holes: %s", min_seqn, first_drained, drain_cnt, skipped_holes-(order_buf->size-last_packet)+1, drain_log);
     return drain_cnt;
 }
