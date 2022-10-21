@@ -206,10 +206,10 @@ mlvpn_reorder_force_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
 {
 	uint64_t min_seqn = b->min_seqn;
 	uint64_t first_drained = 0;
-	uint64_t last_packet = 0;
     uint64_t drain_cnt = 0;
     uint64_t skipped_holes = 0;
     struct cir_buffer *order_buf = &b->order_buf;
+	uint64_t last_packet = order_buf->size;
 	
 	char drain_log[max_pkts];
 	memset(drain_log, 0, max_pkts);

@@ -228,7 +228,7 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 static void
 mlvpn_rtun_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
-    log_warnx("reorder", "reorder timeout: %.0fms. Packet loss?", w->repeat);
+    log_warnx("reorder", "reorder timeout: %fs. Packet loss?", w->repeat);
     mlvpn_rtun_reorder_drain(0);
     if (freebuf->used == 0) {
         log_debug("reorder", "stopping reorder timeout timer in timeout handler");
@@ -334,8 +334,8 @@ mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
         log_debug("reorder", "got new incoming packet");
         mlvpn_pkt_t *pkt = mlvpn_freebuffer_get(freebuf);
         if (!pkt) {
-            log_warnx("reorder", "freebuffer full: reorder_buffer_size must be increased.");
-            mlvpn_rtun_inject_tuntap(inpkt);
+            log_warnx("reorder", "freebuffer full: reorder_buffer_size must be increased, discarding packet.");
+//             mlvpn_rtun_inject_tuntap(inpkt);
             return 1;
         }
         memcpy(pkt, inpkt, sizeof(mlvpn_pkt_t));
@@ -1328,11 +1328,12 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     if (max_srtt > 0) {
         // Apply a factor to the srtt in order to get a window
         max_srtt *= 2.2;
-		double timeout = fmax(max_srtt / 1000.0, 0.128);
-        log_info("reorder", "adjusting reordering drain timeout to %.0fms", timeout);
+		//double timeout = fmax(max_srtt / 1000.0, 0.016);
+		double timeout = max_srtt / 1000.0;
+        log_info("reorder", "adjusting reordering drain timeout to %fs", timeout);
         reorder_drain_timeout.repeat = timeout;
     } else {
-        log_info("reorder", "adjusting reordering drain timeout to 800ms");
+        log_info("reorder", "adjusting reordering drain timeout to 0.8s");
         reorder_drain_timeout.repeat = 0.8; /* Conservative 800ms shot */
     }
 }
