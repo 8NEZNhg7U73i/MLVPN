@@ -581,7 +581,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     proto.reorder = pkt->reorder;
 
     /* we have a recent received timestamp */
-    if (now64 - tun->saved_timestamp_received_at < 1000 ) {
+    if (tun->saved_timestamp_received_at > 0 && now64 - tun->saved_timestamp_received_at < 1000 ) {
         /* send "corrected" timestamp advanced by how long we held it */
         /* Cast to uint16_t there intentional */
         proto.timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
