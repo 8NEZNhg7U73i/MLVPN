@@ -247,6 +247,7 @@ mlvpn_rtun_reorder_drain(uint32_t reorder)
     uint32_t force_drained = 0;
 	uint64_t drained_first = 0;
 	uint64_t drained_last = 0;
+	uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     mlvpn_pkt_t *drained_pkts[max_buffered_packets];
     mlvpn_pkt_t *pkt;
     /* Try to drain packets */
@@ -265,19 +266,19 @@ mlvpn_rtun_reorder_drain(uint32_t reorder)
     if (!reorder) {
         /* Try to drain ordered packets */
         log_info("reorder", "force draining up to %d packets, regularly drained %u packets, first/last seqn: %"PRIu64" / %"PRIu64, max_buffered_packets, drained, drained_first, drained_last);
-        force_drained = mlvpn_reorder_force_drain(reorder_buffer, drained_pkts, max_buffered_packets);
+        force_drained = mlvpn_reorder_force_drain(reorder_buffer, drained_pkts, max_buffered_packets, now64-(uint64_t)(reorder_drain_timeout.repeat*1000));
         for(i = 0; i < force_drained; i++) {
             pkt = drained_pkts[i];
             log_debug("reorder", "force drained packet with seq no %"PRIu64, pkt->seq);
             mlvpn_rtun_inject_tuntap(pkt);
             mlvpn_freebuffer_free(freebuf, drained_pkts[i]);
         }
-        log_info("reorder", "discarding every remaining packet");
+        /*log_info("reorder", "discarding every remaining packet");
         while ((pkt = mlvpn_freebuffer_drain_used(freebuf)) != NULL) {
             log_warnx("reorder", "discarding packet with seq no %"PRIu64, pkt->seq);
             //force_drained++;
             //mlvpn_rtun_inject_tuntap(pkt);
-        }
+        }*/
         log_info("reorder", "force drained %u packets", force_drained);
         //mlvpn_freebuffer_reset(freebuf);
         //mlvpn_reorder_reset(reorder_buffer);
@@ -519,6 +520,7 @@ mlvpn_protocol_read(
 #endif
     decap_pkt->len = rlen;
     decap_pkt->type = proto.flags;
+    decap_pkt->timestamp = now64;
     if (proto.version >= 1) {
         decap_pkt->reorder = proto.reorder;
         decap_pkt->seq = be64toh(proto.data_seq);

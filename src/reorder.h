@@ -151,6 +151,6 @@ mlvpn_reorder_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
         unsigned max_pkts);
 unsigned int
 mlvpn_reorder_force_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
-        unsigned max_pkts);
+        unsigned max_pkts, uint64_t until_timestamp);
 
 #endif /* MLVPN_REORDER_H */

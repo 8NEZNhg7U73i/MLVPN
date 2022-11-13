@@ -19,6 +19,7 @@ typedef struct {
     uint8_t type;
     uint8_t reorder;
     uint64_t seq;
+    uint64_t timestamp;
     char data[DEFAULT_MTU];
 } mlvpn_pkt_t;
 
