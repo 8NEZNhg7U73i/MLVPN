@@ -68,7 +68,7 @@ EXTRA_DIST = \
     systemd.c systemd.h \
     control.c control.h
 
-mlvpn_LDADD=-lm $(libsodium_LIBS) $(libev_LIBS)
+mlvpn_LDADD=-lm -llz4 $(libsodium_LIBS) $(libev_LIBS)
 mlvpn_CFLAGS=$(CFLAGS) $(libsodium_CFLAGS) $(libev_CFLAGS)
 
 if HAVE_FILTERS

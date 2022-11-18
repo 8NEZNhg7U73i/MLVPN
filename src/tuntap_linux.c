@@ -49,16 +49,15 @@ mlvpn_tuntap_write(struct tuntap_s *tuntap)
 
     pkt = mlvpn_pktbuffer_read(buf);
     ret = write(tuntap->fd, pkt->data, pkt->len);
-    if (ret < 0)
-    {
-        log_warn("tuntap", "%s write error", tuntap->devname);
+    if (ret < 0) {
+        log_warn("tuntap", "%s tuntap write error (%d bytes)", tuntap->devname, pkt->len);
     } else {
         if (ret != pkt->len)
         {
-            log_warnx("tuntap", "%s write error: %zd/%d bytes sent",
+            log_warnx("tuntap", "%s tuntap write error: %zd/%d bytes sent",
                tuntap->devname, ret, pkt->len);
         } else {
-            log_debug("tuntap", "%s > sent %zd bytes",
+            log_debug("tuntap", "%s > tuntap sent %zd bytes",
                tuntap->devname, ret);
         }
     }

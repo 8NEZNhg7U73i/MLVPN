@@ -149,6 +149,7 @@ typedef struct mlvpn_tunnel_s
     int disconnects;      /* is it stable ? */
     int conn_attempts;    /* connection attempts */
     int fallback_only;    /* if set, this link will be used when all others are down */
+    int compressed;       /* if set, try to compress packets on this link */
     uint32_t loss_tolerence; /* How much loss is acceptable before the link is discarded */
     uint32_t latency_tolerence; /* How much latency is acceptable before the link is discarded */
     uint64_t seq;
@@ -202,7 +203,8 @@ mlvpn_tunnel_t *mlvpn_rtun_new(const char *name,
     const char *destaddr, const char *destport,
     int server_mode, uint32_t timeout,
     int fallback_only, uint32_t bandwidth,
-    uint32_t loss_tolerence, uint32_t latency_tolerence);
+    uint32_t loss_tolerence, uint32_t latency_tolerence,
+    uint32_t compressed);
 void mlvpn_rtun_drop(mlvpn_tunnel_t *t);
 void mlvpn_rtun_status_down(mlvpn_tunnel_t *t);
 #ifdef HAVE_FILTERS

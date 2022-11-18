@@ -52,12 +52,14 @@ mlvpn_config(int config_file_fd, int first_time)
     char *password = NULL;
     uint32_t tun_mtu = 0;
 
+	uint32_t default_compressed = 0;
     uint32_t default_loss_tolerence = 100;
     uint32_t default_latency_tolerence = 1000;
     uint32_t default_timeout = 60;
     uint32_t default_server_mode = 0; /* 0 => client */
     uint32_t cleartext_data = 0;
     uint32_t fallback_only = 0;
+	uint32_t compressed = 0;
     uint32_t reorder_buffer_size = 0;
 
     mlvpn_options.fallback_available = 0;
@@ -189,6 +191,11 @@ mlvpn_config(int config_file_fd, int first_time)
                     }
                 }
 
+                _conf_set_uint_from_conf(
+                    config, lastSection, "compressed",
+                    &default_compressed, 1,  NULL, 0);
+				log_info("config", "default_compressed = %d", default_compressed);
+                
                 _conf_set_uint_from_conf(
                     config, lastSection, "loss_tolerence",
                     &default_loss_tolerence, 100,  NULL, 0);
@@ -351,6 +358,9 @@ mlvpn_config(int config_file_fd, int first_time)
                 if (fallback_only) {
                     mlvpn_options.fallback_available = 1;
                 }
+                _conf_set_uint_from_conf(
+                    config, lastSection, "compressed", &compressed, default_compressed,
+                    NULL, 0);
                 LIST_FOREACH(tmptun, &rtuns, entries)
                 {
                     if (mystr_eq(lastSection, tmptun->name))
@@ -387,6 +397,12 @@ mlvpn_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->fallback_only, fallback_only);
                             tmptun->fallback_only = fallback_only;
                         }
+                        if (tmptun->compressed != compressed)
+                        {
+                            log_info("config", "%s compressed changed from %d to %d",
+                                tmptun->name, tmptun->compressed, compressed);
+                            tmptun->compressed = compressed;
+                        }
                         if (tmptun->bandwidth != bwlimit)
                         {
                         log_info("config", "%s bandwidth changed from %d to %d",
@@ -412,11 +428,11 @@ mlvpn_config(int config_file_fd, int first_time)
 
                 if (create_tunnel)
                 {
-                    log_info("config", "%s tunnel added", lastSection);
+                    log_info("config", "%s tunnel added (compressed=%d)", lastSection, compressed);
                     mlvpn_rtun_new(
                         lastSection, bindaddr, bindport, bindfib, dstaddr, dstport,
                         default_server_mode, timeout, fallback_only,
-                        bwlimit, loss_tolerence, latency_tolerence);
+                        bwlimit, loss_tolerence, latency_tolerence, compressed);
                 }
                 if (bindaddr)
                     free(bindaddr);

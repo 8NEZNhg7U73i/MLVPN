@@ -30,7 +30,8 @@ typedef struct {
     uint16_t version: 4; /* protocol version */
     uint16_t flags: 6;   /* protocol options */
     uint16_t reorder: 1; /* do reordering or not */
-    uint16_t unused: 5;  /* not used for now */
+    uint16_t compressed: 1; /* packet data is compressed */
+    uint16_t unused: 4;  /* not used for now */
     uint16_t timestamp;
     uint16_t timestamp_reply;
     uint32_t flow_id;

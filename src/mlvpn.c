@@ -34,6 +34,8 @@
 #include <time.h>
 #include <getopt.h>
 #include <pwd.h>
+#include <math.h>
+#include <lz4.h>
 
 #include <sys/types.h>
 #include <sys/select.h>
@@ -475,6 +477,7 @@ mlvpn_protocol_read(
     unsigned char nonce[crypto_NONCEBYTES];
     int ret;
     uint16_t rlen;
+	char decompressed_data[sizeof(pkt->data)];
     mlvpn_proto_t proto;
     uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     /* Overkill */
@@ -552,6 +555,21 @@ mlvpn_protocol_read(
             tun->name, (unsigned int)R, (unsigned int)tun->srtt,
             mlvpn_loss_ratio(tun), tun->seq_vect);
     }
+    
+    //decompress data if needed
+    if(proto.compressed)
+	{
+		int decompressed_len = LZ4_decompress_safe(decap_pkt->data, decompressed_data, decap_pkt->len, sizeof(decompressed_data));
+		if(decompressed_len < 0)
+			log_warnx("compression", "%s received packet not decompressible: %d (%d)", tun->name, decompressed_len, decap_pkt->len);
+		else
+		{
+			log_debug("compression", "%s decompressed packet: %d / %d", tun->name, decap_pkt->len, decompressed_len);
+			memcpy(&decap_pkt->data, decompressed_data, decompressed_len);
+			decap_pkt->len = decompressed_len;
+		}
+	}
+	
     return 0;
 fail:
     return -1;
@@ -563,6 +581,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     unsigned char nonce[crypto_NONCEBYTES];
     ssize_t ret;
     size_t wlen;
+	mlvpn_pkt_t* pkt_ptr;
+	mlvpn_pkt_t comp_pkt;
     mlvpn_proto_t proto;
     uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     memset(&proto, 0, sizeof(proto));
@@ -572,8 +592,6 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     if (pkt->type == MLVPN_PKT_DATA && pkt->reorder) {
         proto.data_seq = data_seq++;
     }
-    wlen = PKTHDRSIZ(proto) + pkt->len;
-    proto.len = pkt->len;
     proto.flags = pkt->type;
     if (pkt->reorder) {
         proto.seq = tun->seq++;
@@ -593,23 +611,58 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
         proto.timestamp_reply = -1;
     }
     proto.timestamp = mlvpn_timestamp16(now64);
+	
+	//compress, if possible
+	proto.compressed = 0;
+	if(tun->compressed && pkt->type == MLVPN_PKT_DATA)
+	{
+		char compressed_data[LZ4_compressBound(pkt->len)];
+		int compressed_size = LZ4_compress_default(pkt->data, compressed_data, pkt->len, sizeof(compressed_data));
+		if(compressed_size == 0 || compressed_size > sizeof(comp_pkt.data) || compressed_size >= pkt->len)
+		{
+			if(!(compressed_size >= pkt->len))
+				log_warnx("compression", "%s compression failed: %d (%d)", tun->name, compressed_size, pkt->len);
+			proto.compressed = 0;
+		}
+		else
+		{
+			log_debug("compression", "%s compressed packet: %d / %d", tun->name, compressed_size, pkt->len);
+			memcpy(&comp_pkt.data, &compressed_data, compressed_size);
+			comp_pkt.len = compressed_size;
+			comp_pkt.type = pkt->type;
+			comp_pkt.reorder = pkt->reorder;
+			comp_pkt.seq = pkt->seq;
+			comp_pkt.timestamp = pkt->timestamp;
+			proto.compressed = 1;
+		}
+	}
+	
+	//select compressed or noncompressed packet without copying data
+	if(proto.compressed)
+		pkt_ptr = &comp_pkt;
+	else
+		pkt_ptr = pkt;
+	
+	wlen = PKTHDRSIZ(proto) + pkt_ptr->len;
+	proto.len = pkt_ptr->len;
+	
 #ifdef ENABLE_CRYPTO
-    if (mlvpn_options.cleartext_data && pkt->type == MLVPN_PKT_DATA) {
-        memcpy(&proto.data, &pkt->data, pkt->len);
+    if (mlvpn_options.cleartext_data && pkt_ptr->type == MLVPN_PKT_DATA) {
+        memcpy(&proto.data, &pkt_ptr->data, pkt_ptr->len);
     } else {
         if (wlen + crypto_PADSIZE > sizeof(proto.data)) {
             log_warnx("protocol", "%s packet too long: %u/%d (packet=%d)",
                 tun->name,
                 (unsigned int)wlen + crypto_PADSIZE,
                 (unsigned int)sizeof(proto.data),
-                pkt->len);
+                pkt_ptr->len);
             return -1;
         }
         sodium_memzero(nonce, sizeof(nonce));
         memcpy(nonce, &proto.seq, sizeof(proto.seq));
         memcpy(nonce + sizeof(proto.seq), &proto.flow_id, sizeof(proto.flow_id));
         if ((ret = crypto_encrypt((unsigned char *)&proto.data,
-                                  (const unsigned char *)&pkt->data, pkt->len,
+                                  (const unsigned char *)&pkt_ptr->data, pkt_ptr->len,
                                   nonce)) != 0) {
             log_warnx("protocol", "%s crypto_encrypt failed: %d incorrect password?",
                 tun->name, (int)ret);
@@ -619,7 +672,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
         wlen += crypto_PADSIZE;
     }
 #else
-    memcpy(&proto.data, &pkt->data, pkt->len);
+    memcpy(&proto.data, &pkt_ptr->data, pkt_ptr->len);
 #endif
     proto.len = htobe16(proto.len);
     proto.seq = htobe64(proto.seq);
@@ -632,7 +685,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     if (ret < 0)
     {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            log_warn("net", "%s write error", tun->name);
+            log_warn("net", "%s udp write error %d/%u [%d](%u < %u)", tun->name, (int)ret, (unsigned int)wlen, proto.compressed, pkt_ptr->len, pkt->len);
             mlvpn_rtun_status_down(tun);
         }
     } else {
@@ -640,11 +693,11 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
         tun->sentbytes += ret;
         if (wlen != ret)
         {
-            log_warnx("net", "%s write error %d/%u",
-                tun->name, (int)ret, (unsigned int)wlen);
+            log_warnx("net", "%s udp write error %d/%u [%d](%u < %u)",
+                tun->name, (int)ret, (unsigned int)wlen, proto.compressed, pkt_ptr->len, pkt->len);
         } else {
-            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%"PRIu64", reorder=%d)",
-                tun->name, (int)ret, pkt->len, pkt->type, pkt->seq, pkt->reorder);
+            log_debug("net", "> %s udp sent %d bytes (size=%d/%d, type=%d, seq=%"PRIu64", reorder=%d)",
+                tun->name, (int)ret, pkt_ptr->len, pkt->len, pkt_ptr->type, pkt_ptr->seq, pkt_ptr->reorder);
         }
     }
 
@@ -674,7 +727,8 @@ mlvpn_rtun_new(const char *name,
                const char *destaddr, const char *destport,
                int server_mode, uint32_t timeout,
                int fallback_only, uint32_t bandwidth,
-               uint32_t loss_tolerence, uint32_t latency_tolerence)
+               uint32_t loss_tolerence, uint32_t latency_tolerence,
+			   uint32_t compressed)
 {
     mlvpn_tunnel_t *new;
 
@@ -723,6 +777,7 @@ mlvpn_rtun_new(const char *name,
     new->fallback_only = fallback_only;
     new->loss_tolerence = loss_tolerence;
     new->latency_tolerence = latency_tolerence;
+	new->compressed = compressed;
     if (bindaddr)
         strlcpy(new->bindaddr, bindaddr, sizeof(new->bindaddr));
     if (bindport)
