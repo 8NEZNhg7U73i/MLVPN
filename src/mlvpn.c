@@ -1473,6 +1473,7 @@ mlvpn_config_reload(EV_P_ ev_signal *w, int revents)
         if (mlvpn_config(config_fd, 0) != 0) {
             log_warn("config", "reload failed");
         } else {
+			log_init(mlvpn_options.debug, mlvpn_options.verbose, mlvpn_options.process_name);
             if (time(&mlvpn_status.last_reload) == -1)
                 log_warn("config", "last_reload time set failed");
             mlvpn_rtun_recalc_weight(0);
@@ -1655,6 +1656,8 @@ main(int argc, char **argv)
     mlvpn_tuntap_init();
     if (mlvpn_config(config_fd, 1) != 0)
         fatalx("cannot open config file");
+
+    log_init(mlvpn_options.debug, mlvpn_options.verbose, mlvpn_options.process_name);
 
     if (mlvpn_tuntap_alloc(&tuntap) <= 0)
         fatalx("cannot create tunnel device");

@@ -50,6 +50,9 @@ mlvpn_config(int config_file_fd, int first_time)
     char *lastSection = NULL;
     char *tundevname = NULL;
     char *password = NULL;
+	char *debug = NULL;
+	char *debug_entry = NULL;
+	uint32_t verbose = 2;
     uint32_t tun_mtu = 0;
 
 	uint32_t default_compressed = 0;
@@ -85,6 +88,21 @@ mlvpn_config(int config_file_fd, int first_time)
                 /* Thoses settings can only by set at start time */
                 if (first_time)
                 {
+					_conf_set_str_from_conf(
+                        config, lastSection, "debug", &debug, NULL,
+                        NULL, 0);
+					if(debug != NULL)
+					{
+						log_info("config", "got debug list: %s", debug);
+						while((debug_entry = strtok(debug, ",")) != NULL)
+						{
+							log_info("config", "adding token to debug list: %s", debug_entry);
+							mlvpn_options.debug = 1;
+							log_accept(debug_entry);
+							debug = NULL;
+						}
+					}
+					
                     _conf_set_str_from_conf(
                         config, lastSection, "statuscommand", &status_command, NULL,
                         NULL, 0);
@@ -155,6 +173,10 @@ mlvpn_config(int config_file_fd, int first_time)
                     NULL, 0);
                 mlvpn_options.cleartext_data = cleartext_data;
 
+				_conf_set_uint_from_conf(
+					config, lastSection, "verbose", &verbose, 2,
+					NULL, 0);
+				mlvpn_options.verbose = verbose;
 
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &default_timeout, 60,
