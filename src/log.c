@@ -41,22 +41,30 @@ static void *logh_arg = NULL;
 static void vlog(int, const char *, const char *, va_list);
 static void logit(int, const char *, const char *, ...);
 
+void log_warnx(const char *token, const char *emsg, ...);
+
 #define MAX_DBG_TOKENS 40
 static const char *tokens[MAX_DBG_TOKENS + 1] = {NULL};
 
 void
 log_init(int n_debug, int n_level, const char *progname)
 {
+	int is_root = getuid() == 0;
     debug = n_debug;
     level = n_level;
 
-    if (!debug) {
-        if (log_opened)
-            closelog();
-        openlog(progname, LOG_PID | LOG_NDELAY, LOG_DAEMON);
-        log_opened = 1;
-    }
+	if (log_opened && is_root)
+	{
+		log_info("log", "Closing syslog: debug=%d, level=%d", debug, level);
+		closelog();
+	}
+	if (is_root) {
+		log_info("log", "(Re)Opening syslog: debug=%d, level=%d", debug, level);
+		openlog(progname, LOG_PID | LOG_NDELAY, LOG_DAEMON);
+		log_opened = 1;
+	}
     tzset();
+    log_info("log", "Loglevel config is now: debug=%d, level=%d", debug, level);
 }
 
 void
@@ -64,6 +72,12 @@ log_register(void (*cb)(int, const char*, void*), void *arg)
 {
     logh = cb;
     logh_arg = arg;
+}
+
+void
+log_clear_accept(void)
+{
+    tokens[0] = NULL;
 }
 
 void
@@ -145,7 +159,7 @@ vlog(int pri, const char *token, const char *fmt, va_list ap)
         }
         /* Otherwise, fallback to output on stderr. */
     }
-    if (debug || logh) {
+    if (logh) {
         char *nfmt;
         /* best effort in out of mem situations */
         if (asprintf(&nfmt, "%s %s%s%s]%s %s\n",

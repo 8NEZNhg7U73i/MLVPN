@@ -88,21 +88,6 @@ mlvpn_config(int config_file_fd, int first_time)
                 /* Thoses settings can only by set at start time */
                 if (first_time)
                 {
-					_conf_set_str_from_conf(
-                        config, lastSection, "debug", &debug, NULL,
-                        NULL, 0);
-					if(debug != NULL)
-					{
-						log_info("config", "got debug list: %s", debug);
-						while((debug_entry = strtok(debug, ",")) != NULL)
-						{
-							log_info("config", "adding token to debug list: %s", debug_entry);
-							mlvpn_options.debug = 1;
-							log_accept(debug_entry);
-							debug = NULL;
-						}
-					}
-					
                     _conf_set_str_from_conf(
                         config, lastSection, "statuscommand", &status_command, NULL,
                         NULL, 0);
@@ -151,6 +136,23 @@ mlvpn_config(int config_file_fd, int first_time)
                 /* This is important to be parsed every time because
                  * it's used later in the configuration parsing
                  */
+				mlvpn_options.debug = 0;
+				log_clear_accept();
+				_conf_set_str_from_conf(
+					config, lastSection, "debug", &debug, NULL,
+					NULL, 0);
+				if(debug != NULL)
+				{
+					log_info("config", "got debug list: %s", debug);
+					mlvpn_options.debug = 1;
+					while((debug_entry = strtok(debug, ",")) != NULL)
+					{
+						log_info("config", "adding token to debug list: %s", debug_entry);
+						log_accept(debug_entry);
+						debug = NULL;
+					}
+				}
+				
                 _conf_set_str_from_conf(
                     config, lastSection, "mode", &mode, NULL,
                     "Operation mode is mandatory.", 1);

@@ -29,5 +29,7 @@ void fatal(const char*, const char *) __attribute__((__noreturn__));
 void fatalx(const char *) __attribute__((__noreturn__));
 void log_register(void (*cb)(int, const char*, void*), void*);
 void log_accept(const char *);
+void log_clear_accept(void);
+
 
 #endif
