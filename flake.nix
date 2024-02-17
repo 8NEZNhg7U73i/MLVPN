@@ -24,6 +24,7 @@
           libev
           libsodium
           libpcap
+          liblz4
         ];
         preConfigure = ''
           ./autogen.sh
